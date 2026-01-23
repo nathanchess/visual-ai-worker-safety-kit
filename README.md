@@ -4,7 +4,7 @@
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://voxel51.com">
-    <img src="assets/VOXEL51.jpg" alt="Voxel51" height="60">
+    <img src="assets/logo_voxel51.png" alt="Voxel51" height="60">
   </a>
 </p>
 
