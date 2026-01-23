@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CVPR 2026 Worker Safety Challenge Enablement Kit
+Visual AI Hackathon Worker Safety Challenge Enablement Kit
 =================================================
 
 This script demonstrates an end-to-end workflow between TwelveLabs and FiftyOne
