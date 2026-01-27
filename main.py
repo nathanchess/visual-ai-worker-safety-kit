@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Visual AI Hackathon Worker Safety Challenge Enablement Kit
-=================================================
+==========================================================
 
 This script demonstrates an end-to-end workflow between TwelveLabs and FiftyOne
 for semantic dataset curation and visualization in the workplace safety domain.
@@ -11,6 +11,7 @@ Key Features:
 - Semantic clustering using video embeddings
 - Auto-labeling with TwelveLabs Pegasus 1.2
 - Interactive visualization with FiftyOne
+- Export to PyTorch using FiftyOne's to_torch() pattern
 
 Usage:
     1. Set environment variables in .env file
@@ -21,41 +22,82 @@ import os
 import json
 import argparse
 
-import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 from sklearn.cluster import KMeans
 from dotenv import load_dotenv
 
 import fiftyone as fo
 import fiftyone.brain as fob
+from fiftyone import ViewField as F
 from fiftyone.core.labels import Classification
+from fiftyone.utils.torch import GetItem
+from fiftyone.utils.huggingface import load_from_hub
 
 from twelvelabs import TwelveLabs
 from twelvelabs.indexes import IndexesCreateRequestModelsItem
 
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 def load_config():
     """Load configuration from environment variables."""
     load_dotenv()
 
     config = {
-        "dataset_path": os.getenv("DATASET_PATH"),
-        "dataset_name": os.getenv("DATASET_NAME", "workplace_surveillance_videos"),
+        "dataset_name": os.getenv("DATASET_NAME", "safe_unsafe_behaviours"),
         "dataset_split": os.getenv("DATASET_SPLIT", "train"),
-        "videos_per_label": int(os.getenv("DATASET_VIDEOS_PER_LABEL", "3")),
+        "videos_per_label": int(os.getenv("VIDEOS_PER_LABEL", "3")),
+        "min_duration": float(os.getenv("MIN_DURATION", "4.0")),
+        "num_clusters": int(os.getenv("NUM_CLUSTERS", "8")),
         "tl_index_name": os.getenv("TL_INDEX_NAME", "fiftyone-twelvelabs-index"),
         "tl_api_key": os.getenv("TL_API_KEY"),
     }
 
-    if not config["dataset_path"]:
-        raise ValueError("DATASET_PATH must be set in the .env file")
     if not config["tl_api_key"]:
         raise ValueError("TL_API_KEY must be set in the .env file")
 
     return config
 
+
+# Label mapping for the Worker Safety dataset
+LABEL_TO_IDX = {
+    "Safe Walkway Violation": 0,
+    "Unauthorized Intervention": 1,
+    "Opened Panel Cover": 2,
+    "Carrying Overload with Forklift": 3,
+    "Safe Walkway": 4,
+    "Authorized Intervention": 5,
+    "Closed Panel Cover": 6,
+    "Safe Carrying": 7,
+}
+
+# Prompt for Pegasus auto-labeling
+CLUSTER_LABEL_PROMPT = """
+Analyze this workplace safety video and classify it as exactly ONE of the following labels.
+
+UNSAFE BEHAVIORS (violations):
+- Safe Walkway Violation: Worker is NOT using the designated safe walkway, walking in restricted/hazardous areas
+- Unauthorized Intervention: Worker accessing or operating equipment without proper authorization
+- Opened Panel Cover: Electrical/machinery panel left open unsafely
+- Carrying Overload with Forklift: Forklift carrying excessive or unstable load
+
+SAFE BEHAVIORS (good practices):
+- Safe Walkway: Worker IS correctly using the designated safe walkway/pedestrian path
+- Authorized Intervention: Worker properly authorized and following procedures for equipment access
+- Closed Panel Cover: Electrical/machinery panels properly secured and closed
+- Safe Carrying: Forklift operating with appropriate, stable load
+
+Return ONLY the exact label name, nothing else.
+"""
+
+
+# =============================================================================
+# TwelveLabs Integration
+# =============================================================================
 
 def get_or_create_twelvelabs_index(client: TwelveLabs, index_name: str) -> str:
     """
@@ -90,161 +132,55 @@ def get_or_create_twelvelabs_index(client: TwelveLabs, index_name: str) -> str:
     return index.id
 
 
-def get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds using OpenCV."""
-    try:
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        cap.release()
-        return frame_count / fps if fps > 0 else 0
-    except Exception:
-        return 0
-
-
-def ingest_videos(
-    client: TwelveLabs,
-    index_id: str,
-    dataset_path: str,
-    dataset_split: str,
-    videos_per_label: int,
-) -> dict:
+def index_video_to_twelvelabs(
+    client: TwelveLabs, index_id: str, sample: fo.Sample
+) -> str:
     """
-    Ingest videos from the dataset into TwelveLabs index.
+    Upload a FiftyOne video sample to TwelveLabs for indexing.
+
+    This function reads the video file from disk, uploads it to TwelveLabs,
+    and waits for the indexing task to complete.
 
     Args:
         client: TwelveLabs client instance
         index_id: TwelveLabs index ID
-        dataset_path: Path to the dataset directory
-        dataset_split: Dataset split to process (e.g., "train")
-        videos_per_label: Maximum number of videos to process per label
+        sample: A FiftyOne Sample object
 
     Returns:
-        Dictionary mapping video filenames to TwelveLabs video IDs
+        The TwelveLabs video_id assigned to the indexed video.
+
+    Raises:
+        Exception: If the indexing task fails.
     """
-    print(f"Loading videos from {dataset_path} with '{dataset_split}' split")
-    print(f"Processing up to {videos_per_label} videos per label")
-
-    video_ids = {}
-
-    for split in os.listdir(dataset_path):
-        if split not in dataset_split:
-            continue
-
-        split_dir = os.path.join(dataset_path, split)
-        if not os.path.isdir(split_dir):
-            continue
-
-        for label_folder in os.listdir(split_dir):
-            folder_path = os.path.join(split_dir, label_folder)
-            if not os.path.isdir(folder_path):
-                continue
-
-            print(f"Reading '{label_folder}' from {folder_path}")
-            video_count = 0
-
-            for video_filename in os.listdir(folder_path):
-                if video_count >= videos_per_label:
-                    break
-
-                video_path = os.path.join(folder_path, video_filename)
-
-                # Skip videos shorter than 4 seconds
-                duration = get_video_duration(video_path)
-                if duration < 4.0:
-                    print(f"Skipping {video_filename}: Duration {duration:.2f}s < 4s")
-                    continue
-
-                try:
-                    with open(video_path, "rb") as f:
-                        video_bytes = f.read()
-
-                    task = client.tasks.create(
-                        index_id=index_id,
-                        video_file=video_bytes,
-                        user_metadata=json.dumps(
-                            {"local_video_file_path": video_path}
-                        ),
-                    )
-                    print(f"Created task for {video_path} with ID {task.id}")
-
-                    # Wait for indexing to complete
-                    wait_task = client.tasks.wait_for_done(task_id=task.id)
-                    if wait_task.status != "ready":
-                        raise Exception(
-                            f"Task {task.id} failed with status {wait_task.status}"
-                        )
-
-                    retrieve_task = client.tasks.retrieve(task_id=task.id)
-                    video_ids[video_filename] = retrieve_task.video_id
-                    print(f"Video indexed successfully with ID {retrieve_task.video_id}")
-                    video_count += 1
-
-                except Exception as e:
-                    print(f"Failed to index {video_filename}: {e}")
-
-    return video_ids
-
-
-def fetch_videos_from_index(client: TwelveLabs, index_id: str):
-    """
-    Fetch videos and their embeddings from TwelveLabs index.
-
-    Yields:
-        Tuples of (video_file_path, video_id, video_embedding)
-    """
-    response = client.indexes.videos.list(index_id=index_id)
-
-    for video in response:
-        video_info = client.indexes.videos.retrieve(
+    with open(sample.filepath, "rb") as f:
+        task = client.tasks.create(
             index_id=index_id,
-            video_id=video.id,
-            embedding_option=["visual"],
+            video_file=f.read(),
+            user_metadata=json.dumps({
+                "filepath": sample.filepath,
+                "sample_id": sample.id,
+                "label": sample.ground_truth.label if sample.ground_truth else None,
+            }),
         )
-        video_file_path = video_info.user_metadata.get("local_video_file_path")
-        video_embedding = video_info.embedding.video_embedding.segments[0].float_
 
-        yield video_file_path, video.id, video_embedding
+    task = client.tasks.wait_for_done(task_id=task.id)
+    if task.status != "ready":
+        raise Exception(f"Task failed: {task.status}")
 
-
-def populate_fiftyone_dataset(
-    client: TwelveLabs, dataset: fo.Dataset, index_id: str
-) -> list:
-    """
-    Populate FiftyOne dataset with videos and embeddings from TwelveLabs.
-
-    Args:
-        client: TwelveLabs client instance
-        dataset: FiftyOne dataset instance
-        index_id: TwelveLabs index ID
-
-    Returns:
-        List of video embeddings
-    """
-    # Clear existing samples
-    dataset.delete_samples(dataset)
-
-    embeddings = []
-
-    for video_file_path, video_id, video_embedding in fetch_videos_from_index(
-        client, index_id
-    ):
-        embeddings.append(video_embedding)
-
-        sample = fo.Sample(
-            filepath=video_file_path,
-            video_id=video_id,
-        )
-        dataset.add_sample(sample)
-
-        print(f"{video_file_path} -> {video_id}")
-        print(f"  Embedding preview: {video_embedding[:5]}")
-
-    print(f"Added {len(embeddings)} samples to dataset")
-    return embeddings
+    return client.tasks.retrieve(task_id=task.id).video_id
 
 
-def generate_label_with_pegasus(client: TwelveLabs, video_id: str) -> str:
+def fetch_embedding(client: TwelveLabs, index_id: str, video_id: str) -> list:
+    """Fetch visual embedding for a TwelveLabs video."""
+    video_info = client.indexes.videos.retrieve(
+        index_id=index_id,
+        video_id=video_id,
+        embedding_option=["visual"],
+    )
+    return video_info.embedding.video_embedding.segments[0].float_
+
+
+def generate_label(client: TwelveLabs, video_id: str) -> str:
     """
     Generate a semantic label for a video using TwelveLabs Pegasus 1.2.
 
@@ -257,138 +193,269 @@ def generate_label_with_pegasus(client: TwelveLabs, video_id: str) -> str:
     """
     result = client.analyze(
         video_id=video_id,
-        prompt=(
-            "Generate a single label either as a single word or phrase "
-            "(with _ separating spaces) to represent the video and its "
-            "respective cluster of similar videos. This dataset relates to "
-            "workplace safety violations and good practices, so please "
-            "identify exact violation or good practice in video"
-        ),
+        prompt=CLUSTER_LABEL_PROMPT,
         temperature=0.2,
     )
     return result.data
 
 
-def cluster_and_label_videos(
+# =============================================================================
+# FiftyOne Dataset Operations
+# =============================================================================
+
+def load_or_create_dataset(dataset_name: str) -> fo.Dataset:
+    """Load existing dataset or create from Hugging Face."""
+    if fo.dataset_exists(dataset_name):
+        print(f"Loading existing dataset '{dataset_name}'...")
+        return fo.load_dataset(dataset_name)
+
+    print(f"Downloading dataset from Hugging Face...")
+    dataset = load_from_hub(
+        "Voxel51/Safe_and_Unsafe_Behaviours",
+        name=dataset_name,
+        persistent=True,
+        overwrite=False,
+    )
+    return dataset
+
+
+def ingest_videos(
+    client: TwelveLabs,
+    index_id: str,
+    dataset: fo.Dataset,
+    dataset_split: str,
+    videos_per_label: int,
+    min_duration: float,
+) -> int:
+    """
+    Ingest videos from FiftyOne dataset into TwelveLabs index.
+
+    Uses FiftyOne views to filter and iterate efficiently:
+    - Filters by split tag and minimum duration
+    - Skips already-indexed videos (idempotent)
+    - Limits to videos_per_label per class
+
+    Args:
+        client: TwelveLabs client instance
+        index_id: TwelveLabs index ID
+        dataset: FiftyOne dataset
+        dataset_split: Split to process (e.g., "train")
+        videos_per_label: Max videos per label
+        min_duration: Minimum video duration in seconds
+
+    Returns:
+        Number of newly indexed videos
+    """
+    # Build filtered view using FiftyOne's view operations
+    base_view = (
+        dataset
+        .match_tags(dataset_split)
+        .match(F("metadata.duration") >= min_duration)
+        .match(~F("tl_video_id").exists())  # Skip already indexed
+    )
+
+    indexed_count = 0
+
+    # Process each label separately for balanced sampling
+    for label in base_view.distinct("ground_truth.label"):
+        label_view = (
+            base_view
+            .match(F("ground_truth.label") == label)
+            .take(videos_per_label)
+        )
+        print(f"\n{label}: {len(label_view)} to index")
+
+        for sample in label_view.iter_samples(autosave=True, progress=True):
+            try:
+                sample["tl_video_id"] = index_video_to_twelvelabs(
+                    client, index_id, sample
+                )
+                print(f"  ✓ {sample.filename}")
+                indexed_count += 1
+            except Exception as e:
+                print(f"  ✗ {sample.filename}: {e}")
+
+    print(f"\nTotal indexed: {len(dataset.exists('tl_video_id'))}")
+    return indexed_count
+
+
+def fetch_embeddings(
+    client: TwelveLabs,
+    index_id: str,
+    dataset: fo.Dataset,
+) -> list:
+    """
+    Fetch embeddings from TwelveLabs and store on FiftyOne samples.
+
+    Uses efficient FiftyOne patterns:
+    - select_fields() to load only needed data
+    - iter_samples(autosave=True) for batched writes
+
+    Returns:
+        List of embeddings (for clustering)
+    """
+    indexed_view = dataset.exists("tl_video_id")
+    print(f"Fetching embeddings for {len(indexed_view)} indexed videos...")
+
+    embeddings = []
+    for sample in indexed_view.select_fields("tl_video_id").iter_samples(
+        progress=True, autosave=True
+    ):
+        embedding = fetch_embedding(client, index_id, sample.tl_video_id)
+        sample["tl_embedding"] = embedding
+        embeddings.append(embedding)
+
+    print(f"\nStored {len(embeddings)} embeddings on dataset")
+    return embeddings
+
+
+def cluster_and_label(
     client: TwelveLabs,
     dataset: fo.Dataset,
     embeddings: list,
     num_clusters: int = 8,
 ) -> tuple:
     """
-    Cluster videos using KMeans and generate semantic labels.
+    Cluster videos and generate semantic labels using Pegasus.
 
-    Args:
-        client: TwelveLabs client instance
-        dataset: FiftyOne dataset instance
-        embeddings: List of video embeddings
-        num_clusters: Number of clusters for KMeans
+    Uses efficient FiftyOne patterns:
+    - values() to extract fields as lists
+    - set_values() for batch updates
 
     Returns:
-        Tuple of (cluster_labels, label_map)
+        Tuple of (cluster_labels array, cluster_label_map dict)
     """
     print(f"Clustering {len(embeddings)} videos into {num_clusters} clusters...")
 
+    # KMeans clustering
     kmeans = KMeans(n_clusters=num_clusters, random_state=0)
     cluster_labels = kmeans.fit_predict(embeddings)
 
-    # Reset cluster field if it exists
-    if "cluster" in dataset.get_field_schema():
-        dataset.delete_sample_field("cluster")
+    # Get indexed view and extract video IDs
+    indexed_view = dataset.exists("tl_video_id")
+    video_ids = indexed_view.values("tl_video_id")
 
-    labels = {}
+    # Generate labels for each cluster (one API call per cluster)
+    cluster_label_map = {}
+    cluster_strings = []
 
-    for sample, label in zip(dataset, cluster_labels):
-        if label not in labels:
-            print(f"Generating label for cluster {label} using Pegasus 1.2...")
-            labels[label] = generate_label_with_pegasus(client, sample.video_id)
-            print(f"  Label: {labels[label]}")
+    for video_id, cluster_idx in zip(video_ids, cluster_labels):
+        if cluster_idx not in cluster_label_map:
+            print(f"Generating label for cluster {cluster_idx}...")
+            cluster_label_map[cluster_idx] = generate_label(client, video_id)
+            print(f"  -> {cluster_label_map[cluster_idx]}")
+        cluster_strings.append(cluster_label_map[cluster_idx])
 
-        sample["cluster"] = labels[label]
-        sample.save()
+    # Batch update using set_values with Classification objects
+    classifications = [Classification(label=s) for s in cluster_strings]
+    indexed_view.set_values("pred_cluster", classifications)
 
-    return cluster_labels, labels
+    print(f"\nCluster labels: {cluster_label_map}")
+    return cluster_labels, cluster_label_map
 
 
-def compute_visualization(dataset: fo.Dataset, embeddings: list):
+def compute_visualization(dataset: fo.Dataset):
     """Compute 2D UMAP visualization of embeddings."""
     print("Computing 2D visualization with UMAP...")
 
+    indexed_view = dataset.exists("tl_video_id")
+
     results = fob.compute_visualization(
-        dataset,
-        embeddings=embeddings,
+        indexed_view,
+        embeddings="tl_embedding",
         num_dims=2,
-        brain_key="image_embeddings",
+        brain_key="tl_embeddings_viz",
+        method="umap",
         verbose=True,
         seed=51,
     )
     return results
 
 
-class WorkerSafetyDataset(Dataset):
+# =============================================================================
+# PyTorch Export using GetItem Pattern
+# =============================================================================
+
+class WorkerSafetyGetItem(GetItem):
     """
-    PyTorch Dataset for the Worker Safety Challenge.
+    Extracts embeddings and labels from FiftyOne samples for classifier training.
 
-    Items returned:
-        - embedding (torch.Tensor): Visual embedding of the video
-        - label_idx (torch.Tensor): Integer label index (cluster ID)
-        - label_str (str): Semantic string description of the label
-        - video_id (str): TwelveLabs Video ID
+    Transforms each sample into:
+    - embedding: 512-dim tensor from TwelveLabs Marengo
+    - label_idx: integer class index
+    - label_str: human-readable label string
     """
 
-    def __init__(self, embeddings, labels, label_map, video_ids):
-        self.embeddings = torch.tensor(embeddings, dtype=torch.float32)
-        self.labels = torch.tensor(labels, dtype=torch.long)
-        self.label_map = label_map
-        self.video_ids = video_ids
+    def __init__(self, label_to_idx, field_mapping=None):
+        self.label_to_idx = label_to_idx
+        super().__init__(field_mapping=field_mapping)
 
-    def __len__(self):
-        return len(self.embeddings)
+    @property
+    def required_keys(self):
+        return ["tl_embedding", "ground_truth"]
 
-    def __getitem__(self, idx):
-        label_idx = self.labels[idx].item()
-        label_str = self.label_map.get(
-            label_idx, self.label_map.get(np.int32(label_idx), "Unknown")
-        )
+    def __call__(self, d):
+        embedding = d.get("tl_embedding")
+        ground_truth = d.get("ground_truth")
+        label_str = ground_truth.label if ground_truth else "Unknown"
 
         return {
-            "embedding": self.embeddings[idx],
-            "label_idx": self.labels[idx],
+            "embedding": torch.tensor(embedding, dtype=torch.float32),
+            "label_idx": torch.tensor(
+                self.label_to_idx.get(label_str, -1), dtype=torch.long
+            ),
             "label_str": label_str,
-            "video_id": self.video_ids[idx],
         }
 
 
-def export_dataset(
-    embeddings: list,
-    cluster_labels,
-    label_map: dict,
-    dataset: fo.Dataset,
-    output_path: str = "worker_safety_dataset.pt",
-):
+def collate_fn(batch):
+    """Custom collate function for DataLoader."""
+    return {
+        "embedding": torch.stack([b["embedding"] for b in batch]),
+        "label_idx": torch.stack([b["label_idx"] for b in batch]),
+        "label_str": [b["label_str"] for b in batch],
+    }
+
+
+def create_dataloader(dataset: fo.Dataset, batch_size: int = 4) -> DataLoader:
     """
-    Export the dataset as a PyTorch .pt file.
+    Create PyTorch DataLoader from FiftyOne dataset using to_torch().
 
     Args:
-        embeddings: List of video embeddings
-        cluster_labels: Array of cluster labels
-        label_map: Dictionary mapping cluster IDs to label strings
-        dataset: FiftyOne dataset instance
-        output_path: Path to save the .pt file
-    """
-    video_ids_ordered = [s.video_id for s in dataset]
+        dataset: FiftyOne dataset with tl_embedding field
+        batch_size: Batch size for DataLoader
 
-    train_dataset = WorkerSafetyDataset(
-        embeddings=embeddings,
-        labels=cluster_labels,
-        label_map=label_map,
-        video_ids=video_ids_ordered,
+    Returns:
+        PyTorch DataLoader ready for training
+    """
+    indexed_view = dataset.exists("tl_video_id")
+
+    getter = WorkerSafetyGetItem(LABEL_TO_IDX)
+    torch_dataset = indexed_view.to_torch(getter)
+
+    print(f"Created PyTorch dataset with {len(torch_dataset)} samples")
+
+    dataloader = DataLoader(
+        torch_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
     )
 
-    print(f"Saving dataset with {len(train_dataset)} samples to {output_path}...")
-    torch.save(train_dataset, output_path)
-    print("Dataset exported successfully!")
+    return dataloader
 
+
+def export_dataloader(dataloader: DataLoader, output_path: str):
+    """Export DataLoader info for verification."""
+    batch = next(iter(dataloader))
+    print(f"Batch embeddings shape: {batch['embedding'].shape}")
+    print(f"Batch labels: {batch['label_idx']}")
+    print(f"Export complete. Use create_dataloader() in your training script.")
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 def main():
     """Main entry point for the enablement kit."""
@@ -401,21 +468,20 @@ def main():
         help="Skip video ingestion (use existing indexed videos)",
     )
     parser.add_argument(
+        "--skip-clustering",
+        action="store_true",
+        help="Skip clustering and labeling",
+    )
+    parser.add_argument(
         "--export-only",
         action="store_true",
-        help="Only export dataset (skip visualization)",
+        help="Only create DataLoader (skip visualization)",
     )
     parser.add_argument(
-        "--num-clusters",
+        "--batch-size",
         type=int,
-        default=8,
-        help="Number of clusters for KMeans (default: 8)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="worker_safety_dataset.pt",
-        help="Output path for exported dataset",
+        default=4,
+        help="Batch size for DataLoader (default: 4)",
     )
     args = parser.parse_args()
 
@@ -429,50 +495,49 @@ def main():
     # Get or create TwelveLabs index
     index_id = get_or_create_twelvelabs_index(tl_client, config["tl_index_name"])
 
-    # Initialize FiftyOne dataset
-    print(f"Initializing FiftyOne dataset '{config['dataset_name']}'...")
-    if fo.dataset_exists(config["dataset_name"]):
-        fo.delete_dataset(config["dataset_name"])
-    dataset = fo.Dataset(config["dataset_name"])
+    # Load or create FiftyOne dataset
+    dataset = load_or_create_dataset(config["dataset_name"])
 
     # Video ingestion (optional)
     if not args.skip_ingestion:
         ingest_videos(
             client=tl_client,
             index_id=index_id,
-            dataset_path=config["dataset_path"],
+            dataset=dataset,
             dataset_split=config["dataset_split"],
             videos_per_label=config["videos_per_label"],
+            min_duration=config["min_duration"],
         )
 
-    # Fetch embeddings and populate dataset
-    print("Fetching video embeddings from TwelveLabs...")
-    embeddings = populate_fiftyone_dataset(tl_client, dataset, index_id)
-
-    if not embeddings:
-        print("No videos found in index. Please run without --skip-ingestion first.")
+    # Fetch embeddings
+    indexed_view = dataset.exists("tl_video_id")
+    if len(indexed_view) == 0:
+        print("No indexed videos found. Run without --skip-ingestion first.")
         return
 
-    # Cluster and auto-label videos
-    cluster_labels, label_map = cluster_and_label_videos(
-        client=tl_client,
-        dataset=dataset,
-        embeddings=embeddings,
-        num_clusters=args.num_clusters,
-    )
+    # Check if embeddings already exist
+    if not indexed_view.first().has_field("tl_embedding"):
+        embeddings = fetch_embeddings(tl_client, index_id, dataset)
+    else:
+        print("Embeddings already exist, loading from dataset...")
+        embeddings = indexed_view.values("tl_embedding")
 
-    # Export dataset
-    export_dataset(
-        embeddings=embeddings,
-        cluster_labels=cluster_labels,
-        label_map=label_map,
-        dataset=dataset,
-        output_path=args.output,
-    )
+    # Cluster and auto-label videos
+    if not args.skip_clustering:
+        cluster_labels, label_map = cluster_and_label(
+            client=tl_client,
+            dataset=dataset,
+            embeddings=embeddings,
+            num_clusters=config["num_clusters"],
+        )
+
+    # Create PyTorch DataLoader
+    dataloader = create_dataloader(dataset, batch_size=args.batch_size)
+    export_dataloader(dataloader, "worker_safety_dataset")
 
     # Launch visualization (optional)
     if not args.export_only:
-        compute_visualization(dataset, embeddings)
+        compute_visualization(dataset)
 
         print("\nLaunching FiftyOne App...")
         print("Navigate to http://localhost:5151 in your browser")
