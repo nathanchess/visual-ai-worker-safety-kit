@@ -12,7 +12,7 @@
 
 > **Semantic Dataset Curator & Visualizer using TwelveLabs + FiftyOne**
 
-This project demonstrates an end-to-end workflow for building high-quality training sets from raw surveillance footage **without manual video scrubbing**. It serves as the primary enablement asset for the **3rd CV4Smalls Workshop @ CVPR 2026** Worker Safety Challenge.
+This project demonstrates an end-to-end workflow for building high-quality training sets from raw surveillance footage **without manual video scrubbing**. It serves as the primary enablement asset for the **Visual AI Hackathon** Worker Safety Challenge.
 
 <p align="center">
   <img src="assets/preview.png" alt="FiftyOne Preview" width="800">
@@ -236,7 +236,7 @@ for batch in train_loader:
 
 ## Challenge Context
 
-- **Event**: 3rd CV4Smalls Workshop @ CVPR 2026
+- **Event**: Visual AI Hackathon
 - **Track**: Worker Safety Challenge
 - **Objective**: Build efficient video classifiers from small, curated datasets
 
