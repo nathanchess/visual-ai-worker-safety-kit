@@ -125,6 +125,12 @@ Or use the Jupyter notebook for an interactive walkthrough:
 jupyter notebook main.ipynb
 ```
 
+### Try in Google Colab
+
+Run the entire workflow in your browser with no local setup:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1j-9Gh21Zdl4nvbQS_fpsQ9XhMEwbjnlm?usp=sharing)
+
 ## Dataset
 
 The [Safe and Unsafe Behaviours Dataset](https://huggingface.co/datasets/Voxel51/Safe_and_Unsafe_Behaviours) is automatically downloaded from Hugging Face. It contains 8 classes:
