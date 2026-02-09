@@ -12,10 +12,12 @@
 
 > **Semantic Dataset Curator & Visualizer using TwelveLabs + FiftyOne**
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1j-9Gh21Zdl4nvbQS_fpsQ9XhMEwbjnlm?usp=sharing)
+
 This project demonstrates an end-to-end workflow for building high-quality training sets from raw surveillance footage **without manual video scrubbing**. It serves as the primary enablement asset for the **Visual AI Hackathon** Worker Safety Challenge.
 
 <p align="center">
-  <img src="assets/preview.png" alt="FiftyOne Preview" width="800">
+  <img src="assets/demo.gif" alt="Demo" width="800">
 </p>
 
 ## Strategic Goal
@@ -30,39 +32,9 @@ By combining TwelveLabs' video understanding with FiftyOne's data management, yo
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│              FiftyOne Dataset (from Hugging Face)                │
-│                  Safe & Unsafe Behaviours Dataset                │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│              TwelveLabs Video Understanding Platform             │
-│  ┌─────────────────────┐    ┌─────────────────────────────────┐  │
-│  │   Marengo 3.0       │    │   Pegasus 1.2                   │  │
-│  │   512-dim Embeddings│    │   Zero-shot Auto-labeling       │  │
-│  └─────────────────────┘    └─────────────────────────────────┘  │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     Semantic Clustering                          │
-│                  (KMeans on Embeddings)                          │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                   FiftyOne Visualization                         │
-│         (Interactive UMAP + Dataset Exploration)                 │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────────┐
-│              PyTorch DataLoader via to_torch()                   │
-│          (Ready for classifier fine-tuning)                      │
-└──────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/architecture.png" alt="Architecture" width="800">
+</p>
 
 ## Quick Start
 
@@ -125,11 +97,6 @@ Or use the Jupyter notebook for an interactive walkthrough:
 jupyter notebook main.ipynb
 ```
 
-### Try in Google Colab
-
-Run the entire workflow in your browser with no local setup:
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1j-9Gh21Zdl4nvbQS_fpsQ9XhMEwbjnlm?usp=sharing)
 
 ## Dataset
 
