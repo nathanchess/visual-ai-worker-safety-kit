@@ -13,6 +13,7 @@
 > **Semantic Dataset Curator & Visualizer using TwelveLabs + FiftyOne**
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1j-9Gh21Zdl4nvbQS_fpsQ9XhMEwbjnlm?usp=sharing)
+[![Watch Tutorial](https://img.shields.io/badge/YouTube-Watch%20Tutorial-red?logo=youtube&logoColor=white)](https://youtu.be/s9rB9TDvhT8?si=r3EUG0xXU9bghAVi)
 
 This project demonstrates an end-to-end workflow for building high-quality training sets from raw surveillance footage **without manual video scrubbing**. It serves as the primary enablement asset for the **Visual AI Hackathon** Worker Safety Challenge.
 
